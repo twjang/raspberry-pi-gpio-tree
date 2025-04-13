@@ -1,0 +1,14 @@
+[package]
+name = "gpio_lighttree"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures-util = { version = "0.3.31", features = ["futures-sink", "sink"] }
+rppal = {version="0.22.1", features=["hal"]}
+tokio = { version = "1.44.2", features = ["full"] }
+tokio-util = "0.7.14"
+tokio-websockets = { version = "0.11.3", features = ["server", "sha1_smol"] }
+
+[build]
+target="aarch64-unknown-linux-musl"
