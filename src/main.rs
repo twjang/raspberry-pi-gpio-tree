@@ -328,6 +328,7 @@ async fn main_server() -> io::Result<()> {
 }
 
 fn main() {
+    logging::init();
     logging::info(format_args!("application_starting"));
 
     LIGHT_CTRL
