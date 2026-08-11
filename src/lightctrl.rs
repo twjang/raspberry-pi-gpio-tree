@@ -1,19 +1,24 @@
 use std::sync::RwLock;
+use std::time::Duration;
 
-use rppal::gpio::Gpio;
+use rppal::pwm::{Channel, Polarity, Pwm};
 
-pub struct LightCtrl{
+use crate::logging;
+
+pub const MAX_BRIGHTNESS: u32 = 1000;
+
+pub struct LightCtrl {
     pub brigntness: u32,
-    pub pin_id: u8,
+    pub channel: Channel,
     pub period: u32, // in microseconds
     pub exit: bool,
 }
 
 impl LightCtrl {
-    pub fn new(pin_id: u8, period: u32) -> Self {
+    pub fn new(channel: Channel, period: u32) -> Self {
         LightCtrl {
             brigntness: 0,
-            pin_id,
+            channel,
             period,
             exit: false,
         }
@@ -24,11 +29,13 @@ impl LightCtrl {
             return Err("Already halted".to_string());
         }
 
-        if brightness <= 100 {
+        if brightness <= MAX_BRIGHTNESS {
             self.brigntness = brightness;
             Ok(())
         } else {
-            return Err(format!("Brightness value {} is out of range (0-100)", brightness));
+            return Err(format!(
+                "Brightness value {brightness} is out of range (0-{MAX_BRIGHTNESS})"
+            ));
         }
     }
 
@@ -43,39 +50,52 @@ impl LightCtrl {
     pub fn halt(&mut self) {
         self.exit = true;
     }
-
 }
 
-pub fn light_control_thread(ctrllck: &RwLock<Option<LightCtrl>>)-> Result<(), String> {
-    let pin_id = {
+pub fn light_control_thread(ctrllck: &RwLock<Option<LightCtrl>>) -> Result<(), String> {
+    let (channel, period, mut brightness) = {
         let light_ctrl_lck = ctrllck.read().unwrap();
         let light_ctrl = light_ctrl_lck.as_ref().unwrap();
-        light_ctrl.pin_id
+        (light_ctrl.channel, light_ctrl.period, light_ctrl.brigntness)
     };
 
-    let gpio = Gpio::new().unwrap();
-    let mut pin = gpio.get(pin_id).unwrap().into_output();
-    
-    let mut period_64;
-    let mut brightness_64;
+    let pwm = Pwm::with_period(
+        channel,
+        Duration::from_micros(period as u64),
+        Duration::from_micros(
+            (period as u64 * brightness.min(MAX_BRIGHTNESS) as u64) / MAX_BRIGHTNESS as u64,
+        ),
+        Polarity::Normal,
+        true,
+    )
+    .map_err(|error| format!("Failed to initialize PWM channel {channel}: {error}"))?;
+
+    logging::info(format_args!(
+        "pwm_started channel={channel} period_us={period} brightness={brightness}"
+    ));
+
     loop {
-        {
+        let new_brightness = {
             let light_ctrl_lck = ctrllck.read().unwrap();
             let light_ctrl = light_ctrl_lck.as_ref().unwrap();
             if light_ctrl.exit {
                 break;
             }
-            period_64 = light_ctrl.period as u64;
-            brightness_64 = light_ctrl.brigntness as u64;
-        }
-        let high_time: u64 = std::cmp::min( (period_64 * brightness_64) / 100, period_64);
-        let low_time: u64 = period_64 - high_time;
+            light_ctrl.brigntness
+        };
 
-        pin.set_high();
-        std::thread::sleep(std::time::Duration::from_micros(high_time));
-        pin.set_low();
-        std::thread::sleep(std::time::Duration::from_micros(low_time));
+        if new_brightness != brightness {
+            brightness = new_brightness;
+            pwm.set_duty_cycle(brightness as f64 / MAX_BRIGHTNESS as f64)
+                .map_err(|error| format!("Failed to set PWM duty cycle: {error}"))?;
+        }
+
+        std::thread::sleep(Duration::from_micros(period as u64));
     }
+
+    pwm.disable()
+        .map_err(|error| format!("Failed to disable PWM channel {channel}: {error}"))?;
+    logging::info(format_args!("pwm_stopped channel={channel}"));
 
     Ok(())
 }
