@@ -8,6 +8,10 @@ pub fn info(message: fmt::Arguments<'_>) {
     log::info!("{message}");
 }
 
+pub fn debug(message: fmt::Arguments<'_>) {
+    log::debug!("{message}");
+}
+
 pub fn warn(message: fmt::Arguments<'_>) {
     log::warn!("{message}");
 }

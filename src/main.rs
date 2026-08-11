@@ -4,6 +4,8 @@ mod logging;
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -18,7 +20,7 @@ use lightctrl::light_control_thread;
 
 const LISTEN_ADDRESS: &str = "0.0.0.0:3000";
 const MAX_HTTP_HEADER_SIZE: usize = 8 * 1024;
-const INDEX_HTML: &str = include_str!("../static/index.html");
+const DEFAULT_HTML_PATH: &str = "static/index.html";
 
 static LIGHT_CTRL: std::sync::RwLock<Option<lightctrl::LightCtrl>> = std::sync::RwLock::new(None);
 
@@ -76,7 +78,11 @@ async fn write_http_response(
     stream.shutdown().await
 }
 
-async fn serve_http(mut stream: TcpStream, peer: SocketAddr) -> io::Result<()> {
+async fn serve_http(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    index_html: Arc<[u8]>,
+) -> io::Result<()> {
     let request = read_http_request(&mut stream).await?;
     let request_line = request.lines().next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
@@ -93,7 +99,7 @@ async fn serve_http(mut stream: TcpStream, peer: SocketAddr) -> io::Result<()> {
                 &mut stream,
                 "200 OK",
                 "text/html; charset=utf-8",
-                INDEX_HTML.as_bytes(),
+                index_html.as_ref(),
             )
             .await
         }
@@ -137,7 +143,7 @@ fn handle_command(command: &str, peer: SocketAddr, token: &CancellationToken) ->
 
         match light_ctrl.set(brightness) {
             Ok(()) => {
-                logging::info(format_args!(
+                logging::debug(format_args!(
                     "brightness_set peer={peer} value={brightness}"
                 ));
                 format!("set={brightness}\n")
@@ -252,7 +258,12 @@ async fn serve_websocket(stream: TcpStream, peer: SocketAddr, token: Cancellatio
     logging::info(format_args!("websocket_disconnected peer={peer}"));
 }
 
-async fn handle_connection(stream: TcpStream, peer: SocketAddr, token: CancellationToken) {
+async fn handle_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    token: CancellationToken,
+    index_html: Arc<[u8]>,
+) {
     let request_type =
         match tokio::time::timeout(Duration::from_secs(5), request_is_websocket(&stream)).await {
             Ok(request_type) => request_type,
@@ -265,7 +276,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, token: Cancellat
     match request_type {
         Ok(true) => serve_websocket(stream, peer, token).await,
         Ok(false) => {
-            if let Err(error) = serve_http(stream, peer).await {
+            if let Err(error) = serve_http(stream, peer, index_html).await {
                 logging::warn(format_args!(
                     "http_connection_failed peer={peer} error={error}"
                 ));
@@ -285,9 +296,26 @@ fn halt_light_controller() {
 }
 
 async fn main_server() -> io::Result<()> {
+    let html_path = std::env::var_os("LIGHTTREE_HTML")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_HTML_PATH));
+    let index_html: Arc<[u8]> = tokio::fs::read(&html_path)
+        .await
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to read {}: {error}", html_path.display()),
+            )
+        })?
+        .into();
     let listener = TcpListener::bind(LISTEN_ADDRESS).await?;
     let token = CancellationToken::new();
 
+    logging::info(format_args!(
+        "html_loaded path={} bytes={}",
+        html_path.display(),
+        index_html.len()
+    ));
     logging::info(format_args!(
         "server_started address={LISTEN_ADDRESS} ui=http://{LISTEN_ADDRESS}/"
     ));
@@ -312,7 +340,12 @@ async fn main_server() -> io::Result<()> {
                 match connection {
                     Ok((stream, peer)) => {
                         logging::info(format_args!("connection_accepted peer={peer}"));
-                        tokio::spawn(handle_connection(stream, peer, token.clone()));
+                        tokio::spawn(handle_connection(
+                            stream,
+                            peer,
+                            token.clone(),
+                            Arc::clone(&index_html),
+                        ));
                     }
                     Err(error) => logging::warn(format_args!(
                         "connection_accept_failed error={error}"
